@@ -70,6 +70,33 @@ pytest -m perf --device cuda        # only the GPU timing tests
 Everything starts **red** (`NotImplementedError`). Work one module top-to-bottom;
 green means you matched the reference behavior.
 
+## Watch it learn real text
+
+Once Stages 1–3 are green, `train.py` trains a byte-level GPT and prints samples —
+an end-to-end smoke test of your forward pass, KV-cache decode, and sampling:
+
+```bash
+python train.py --device cuda                 # downloads tinyshakespeare (offline fallback bundled)
+python train.py --device cuda --max-iters 3000 --n-embd 256
+```
+
+A 0.8M-param model reaches val loss ~2.2 in ~12s on an RTX 5080 and starts
+emitting Shakespeare-shaped text. (Generation is capped at `block_size` — learned
+absolute position embeddings can't extrapolate; RoPE/sliding-window is the fix.)
+
+## Reference solutions
+
+A complete implementation lives on the **`reference-solution`** branch. Attempt a
+stage yourself first, then diff:
+
+```bash
+git diff master reference-solution -- src/nanoinfer/model.py    # one module
+git diff master reference-solution                              # everything
+```
+
+The branch differs from `master` only in `src/nanoinfer/*.py` (the bodies) — tests
+and tooling are identical, so the diff is purely "your job vs. one correct answer."
+
 ## How to use this for interview prep
 
 - Treat each docstring as the problem statement and the test as the acceptance
