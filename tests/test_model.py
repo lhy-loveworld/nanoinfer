@@ -1,0 +1,81 @@
+"""Stage 1b — assembled model.
+
+No external weights to compare against, so these tests check the structural
+invariants a correct GPT forward pass must satisfy: shapes, causality (a future
+token can't change an earlier position's logits), weight tying, and grad flow.
+"""
+import pytest
+import torch
+
+from nanoinfer.config import GPTConfig
+from nanoinfer.model import GPT, MLP, Block, CausalSelfAttention
+
+
+@pytest.fixture
+def config():
+    return GPTConfig()
+
+
+def test_mlp_shape(config):
+    x = torch.randn(2, 5, config.n_embd)
+    assert MLP(config)(x).shape == x.shape
+
+
+def test_attention_module_shape(config):
+    x = torch.randn(2, 5, config.n_embd)
+    assert CausalSelfAttention(config)(x).shape == x.shape
+
+
+def test_block_shape_and_residual(config):
+    x = torch.randn(2, 5, config.n_embd)
+    out = Block(config)(x)
+    assert out.shape == x.shape
+    # residual stream means output should not equal the sublayer output alone
+    assert not torch.allclose(out, x)
+
+
+def test_gpt_forward_shape(config):
+    model = GPT(config)
+    idx = torch.randint(0, config.vocab_size, (3, 7))
+    logits = model(idx)
+    assert logits.shape == (3, 7, config.vocab_size)
+
+
+def test_weight_tying(config):
+    model = GPT(config)
+    assert model.transformer.wte.weight is model.lm_head.weight
+
+
+def test_gpt_is_causal(config):
+    """Changing token at position t must not affect logits at positions < t."""
+    model = GPT(config)
+    model.eval()
+    idx = torch.randint(0, config.vocab_size, (1, 8))
+    with torch.no_grad():
+        base = model(idx)
+        idx2 = idx.clone()
+        idx2[0, -1] = (idx2[0, -1] + 1) % config.vocab_size  # change last token
+        perturbed = model(idx2)
+    torch.testing.assert_close(base[:, :-1], perturbed[:, :-1])
+
+
+def test_gpt_backward(config):
+    model = GPT(config)
+    idx = torch.randint(0, config.vocab_size, (2, 6))
+    logits = model(idx)
+    logits.sum().backward()
+    # every parameter that requires grad should receive one
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            assert p.grad is not None, f"no grad for {name}"
+
+
+@pytest.mark.gpu
+def test_gpt_runs_on_gpu(config, device):
+    if device.type != "cuda":
+        pytest.skip("pass --device cuda to run")
+    model = GPT(config).to(device)
+    idx = torch.randint(0, config.vocab_size, (4, 16), device=device)
+    logits = model(idx)
+    assert logits.device.type == "cuda"
+    assert logits.shape == (4, 16, config.vocab_size)

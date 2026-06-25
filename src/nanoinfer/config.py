@@ -1,0 +1,35 @@
+"""Model configuration. This file is complete — nothing to implement here."""
+from dataclasses import dataclass
+
+
+@dataclass
+class GPTConfig:
+    """Hyperparameters for the GPT model.
+
+    Defaults describe a tiny model that trains/runs in milliseconds on CPU, so
+    the test suite stays fast. `n_kv_head < n_head` enables grouped-query
+    attention (GQA), which is the lever that shrinks the KV cache in real
+    serving systems — keep it in mind throughout the inference stages.
+    """
+
+    vocab_size: int = 256       # byte-level vocab keeps things self-contained
+    block_size: int = 64        # maximum context length
+    n_layer: int = 2
+    n_head: int = 4             # number of query heads
+    n_kv_head: int = 2          # number of key/value heads (GQA when < n_head)
+    n_embd: int = 32            # embedding / residual stream width
+    dropout: float = 0.0
+    bias: bool = True
+
+    def __post_init__(self):
+        assert self.n_embd % self.n_head == 0, "n_embd must be divisible by n_head"
+        assert self.n_head % self.n_kv_head == 0, "n_head must be divisible by n_kv_head"
+
+    @property
+    def head_dim(self) -> int:
+        return self.n_embd // self.n_head
+
+    @property
+    def n_rep(self) -> int:
+        """How many query heads share each KV head (the GQA group size)."""
+        return self.n_head // self.n_kv_head
