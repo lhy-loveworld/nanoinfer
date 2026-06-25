@@ -123,6 +123,9 @@ def main():
     def sample(n_tokens: int = 200) -> str:
         model.eval()
         prompt = torch.tensor([[ord("\n")]], dtype=torch.long, device=device)
+        # learned absolute position embeddings cap the sequence at block_size,
+        # so we can't generate past it (use RoPE / sliding window to go further)
+        n_tokens = min(n_tokens, cfg.block_size - prompt.shape[1])
         g = torch.Generator(device=device).manual_seed(args.seed)
         out = generate(model, prompt, n_tokens, temperature=0.8, top_k=40, generator=g)
         model.train()
