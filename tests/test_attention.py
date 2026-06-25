@@ -35,9 +35,14 @@ def test_attention_matches_sdpa_causal(Tq, Tk):
     k = torch.randn(B, nh, Tk, hd)
     v = torch.randn(B, nh, Tk, hd)
     got = attention(q, k, v, causal=True)
-    # F.sdpa aligns the causal mask so the last query sees the last key — same
-    # convention this exercise asks for (j0 = Tk - Tq).
-    want = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    # Bottom-right aligned causal mask (j0 = Tk - Tq): the last query sees the
+    # last key, so a single decode query (Tq=1) attends the whole cache. Note
+    # F.sdpa's is_causal=True uses *top-left* tril and is only equivalent when
+    # Tq == Tk — so we build the mask explicitly to pin the decode convention.
+    q_idx = torch.arange(Tq).view(Tq, 1)
+    k_idx = torch.arange(Tk).view(1, Tk)
+    mask = k_idx <= (Tk - Tq) + q_idx  # True = attend
+    want = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
     assert got.shape == (B, nh, Tq, hd)
     torch.testing.assert_close(got, want, rtol=1e-4, atol=1e-5)
 

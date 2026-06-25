@@ -1,15 +1,4 @@
-"""Stage 3 — sampling and the decode loop.
-
-Sampling is where serving meets product behavior: temperature, top-k, and top-p
-(nucleus) all reshape the next-token distribution before you draw from it. Get
-the filtering semantics exactly right — off-by-one nucleus bugs are a classic.
-
-All logit filters operate on the last dim (vocab) and return logits (with
-removed entries set to -inf) so a single softmax downstream stays correct.
-
-Run the tests with:
-    pytest tests/test_generate.py
-"""
+"""Stage 3 — sampling and the decode loop. [REFERENCE SOLUTION]"""
 from __future__ import annotations
 
 import torch
@@ -21,47 +10,26 @@ from .model import GPT
 
 
 def apply_temperature(logits: torch.Tensor, temperature: float) -> torch.Tensor:
-    """Scale logits by 1/temperature.
-
-    Args:
-        logits: (..., vocab)
-        temperature: > 0. Higher = flatter/more random, lower = sharper.
-    Returns:
-        logits / temperature. (Temperature == 0 is handled by the caller as
-        greedy/argmax — you may assume temperature > 0 here.)
-    """
-    raise NotImplementedError
+    return logits / temperature
 
 
 def top_k_filter(logits: torch.Tensor, k: int) -> torch.Tensor:
-    """Keep only the k highest-logit entries; set the rest to -inf.
-
-    Args:
-        logits: (B, vocab)
-        k: number of entries to keep (k >= 1). If k >= vocab, return logits as-is.
-    Returns:
-        (B, vocab) with all but the top-k entries (per row) set to -inf.
-    """
-    raise NotImplementedError
+    if k >= logits.size(-1):
+        return logits
+    kth = torch.topk(logits, k, dim=-1).values[..., -1, None]  # kth largest per row
+    return logits.masked_fill(logits < kth, float("-inf"))
 
 
 def top_p_filter(logits: torch.Tensor, p: float) -> torch.Tensor:
-    """Nucleus filtering: keep the smallest set of tokens whose cumulative
-    probability mass exceeds p; set the rest to -inf.
-
-    Args:
-        logits: (B, vocab)
-        p: cumulative probability threshold in (0, 1].
-    Returns:
-        (B, vocab) filtered logits.
-
-    Semantics (match these exactly — the tests check the boundary):
-        - sort probabilities descending
-        - include tokens until the cumulative sum first reaches/exceeds p
-        - ALWAYS keep at least the single most probable token (even if it alone
-          already exceeds p)
-    """
-    raise NotImplementedError
+    sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+    probs = F.softmax(sorted_logits, dim=-1)
+    cum_prev = probs.cumsum(dim=-1) - probs  # exclusive prefix sum
+    # remove a token if everything *before* it already reached p (keeps >=1 token,
+    # since the top token's cum_prev is always 0 < p)
+    remove_sorted = cum_prev >= p
+    remove = torch.zeros_like(remove_sorted)
+    remove.scatter_(-1, sorted_idx, remove_sorted)
+    return logits.masked_fill(remove, float("-inf"))
 
 
 def sample_next(
@@ -72,20 +40,15 @@ def sample_next(
     top_p: float | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """Pick the next token id for each row of `logits`.
-
-    Args:
-        logits: (B, vocab) raw logits for the next position.
-        temperature: 0.0 means greedy (argmax). Otherwise scale then sample.
-        top_k / top_p: optional filters applied (in that order) before sampling.
-        generator: optional torch.Generator for reproducible sampling.
-    Returns:
-        (B,) int64 token ids.
-
-    Order of operations: greedy short-circuit -> temperature -> top_k -> top_p
-    -> softmax -> multinomial sample (use the generator).
-    """
-    raise NotImplementedError
+    if temperature == 0.0:
+        return logits.argmax(dim=-1)
+    logits = apply_temperature(logits, temperature)
+    if top_k is not None:
+        logits = top_k_filter(logits, top_k)
+    if top_p is not None:
+        logits = top_p_filter(logits, top_p)
+    probs = F.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1, generator=generator).squeeze(-1)
 
 
 @torch.no_grad()
@@ -99,24 +62,19 @@ def generate(
     top_p: float | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """Autoregressively extend `idx` by `max_new_tokens`, using the KV cache.
+    B, T0 = idx.shape
+    cfg = model.config
+    total = T0 + max_new_tokens
+    dtype = next(model.parameters()).dtype
+    cache = KVCache(cfg, batch_size=B, max_seq_len=total, device=idx.device, dtype=dtype)
 
-    Args:
-        idx: (B, T0) prompt token ids.
-        max_new_tokens: how many tokens to append.
-    Returns:
-        (B, T0 + max_new_tokens) token ids.
-
-    Sketch:
-        1. allocate a KVCache sized for T0 + max_new_tokens
-        2. prefill: logits = decode_step(model, idx, cache, start_pos=0)
-        3. loop max_new_tokens times:
-             - next_tok = sample_next(logits[:, -1], ...)   # (B,)
-             - append next_tok to the running sequence
-             - logits = decode_step(model, next_tok[:, None], cache, start_pos=cache.length)
-        4. return the full sequence
-
-    This is the function the batching stage (Stage 4) generalizes to many
-    sequences of different lengths sharing the model.
-    """
-    raise NotImplementedError
+    seq = idx
+    logits = decode_step(model, idx, cache, start_pos=0)  # prefill
+    for _ in range(max_new_tokens):
+        nxt = sample_next(
+            logits[:, -1], temperature=temperature, top_k=top_k, top_p=top_p,
+            generator=generator,
+        )  # (B,)
+        seq = torch.cat([seq, nxt[:, None]], dim=1)
+        logits = decode_step(model, nxt[:, None], cache, start_pos=cache.length)
+    return seq

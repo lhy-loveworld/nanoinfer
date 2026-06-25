@@ -1,65 +1,37 @@
-"""Stage 4 — continuous (iteration-level) batching.
-
-Static batching wastes the GPU: the whole batch waits for its slowest sequence
-to finish before anything new starts. Continuous batching (Orca / vLLM style)
-schedules at the granularity of a *single decode step* — as soon as one sequence
-finishes, its slot is freed and a waiting request is admitted. The GPU stays
-full; short requests don't get stuck behind long ones (no head-of-line blocking).
-
-This stage has two implementable pieces:
-    1. `batched_decode_step` — one fused decode step over a batch whose rows are
-       at *different* cache lengths (ragged), masking each row to its own valid
-       prefix. This is the compute primitive.
-    2. `ContinuousBatchingScheduler.step` / `.run` — the scheduling policy that
-       admits, decodes, and retires requests slot-by-slot.
-
-Sampling stays per-request (each Request carries its own generator) so a request
-produces the *same* tokens whether it ran alone or inside a batch — that's the
-correctness contract the tests enforce.
-
-Run the tests with:
-    pytest tests/test_batching.py
-"""
+"""Stage 4 — continuous (iteration-level) batching. [REFERENCE SOLUTION]"""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import torch
+import torch.nn.functional as F
 
 from .config import GPTConfig
 from .generate import sample_next
-from .model import GPT, attention, repeat_kv
+from .model import GPT, repeat_kv
 
 
 @dataclass
 class Request:
-    """One generation request. Complete — nothing to implement here."""
     req_id: int
-    prompt: torch.Tensor          # (T0,) int64 token ids
+    prompt: torch.Tensor
     max_new_tokens: int
     temperature: float = 1.0
     top_k: int | None = None
     top_p: float | None = None
     seed: int = 0
-    # filled in as it runs:
     generated: list[int] = field(default_factory=list)
-    slot: int | None = None       # which batch row it occupies while running
+    slot: int | None = None
     done: bool = False
+    _gen: torch.Generator | None = field(default=None, repr=False)
 
     def output(self) -> torch.Tensor:
-        """Full sequence: prompt followed by generated tokens."""
-        gen = torch.tensor(self.generated, dtype=torch.long)
+        gen = torch.tensor(self.generated, dtype=torch.long, device=self.prompt.device)
         return torch.cat([self.prompt, gen])
 
 
 class BatchedKVCache:
-    """KV cache with a fixed number of slots (rows), each tracking its own
-    length. Complete — use it from your scheduler / decode step.
-
-    A slot is a row of the batch. `lengths[s]` is how many valid positions slot
-    s currently holds. Free slots are tracked in `free_slots`.
-    """
-
     def __init__(self, config: GPTConfig, n_slots: int, max_seq_len: int,
                  device=None, dtype=torch.float32):
         self.config = config
@@ -72,7 +44,6 @@ class BatchedKVCache:
         self.free_slots = list(range(n_slots))
 
     def allocate(self) -> int:
-        """Reserve a free slot, returning its index. Raises if none free."""
         if not self.free_slots:
             raise RuntimeError("no free slots")
         s = self.free_slots.pop(0)
@@ -86,13 +57,6 @@ class BatchedKVCache:
             self.free_slots.sort()
 
     def write(self, layer_idx: int, rows: list[int], k: torch.Tensor, v: torch.Tensor) -> None:
-        """Append one new K/V vector for the given rows at each row's length.
-
-        Args:
-            rows: the active slot indices, in the same order as the batch dim of k/v
-            k, v: (len(rows), nkv, 1, hd) new keys/values (single decode step)
-        Does NOT advance lengths — the decode step advances them after all layers.
-        """
         for i, s in enumerate(rows):
             pos = int(self.lengths[s])
             self.k[layer_idx, s, :, pos:pos + 1] = k[i]
@@ -102,100 +66,111 @@ class BatchedKVCache:
 @torch.no_grad()
 def batched_decode_step(model: GPT, idx: torch.Tensor, cache: BatchedKVCache,
                         rows: list[int]) -> torch.Tensor:
-    """One fused decode step for a ragged batch of single new tokens.
+    n = len(rows)
+    cfg = model.config
+    device = idx.device
+    lengths = cache.lengths[rows]                       # (n,) length BEFORE this token
+    Lmax = int(lengths.max().item()) + 1                # +1 for the new token
 
-    Args:
-        model: GPT with working Stage 1 weights/forward.
-        idx: (n_active, 1) the new token id for each active row (order matches `rows`).
-        cache: the BatchedKVCache.
-        rows: active slot indices, parallel to idx's batch dimension.
+    pos_emb = model.transformer.wpe(lengths).unsqueeze(1)   # new token sits at `length`
+    x = model.transformer.wte(idx) + pos_emb            # (n, 1, C)
 
-    Returns:
-        logits: (n_active, vocab_size) for the new position of each active row.
+    # key-padding mask: row r may attend key positions 0..lengths[r] (inclusive)
+    key_idx = torch.arange(Lmax, device=device)[None, :]    # (1, Lmax)
+    valid = key_idx <= lengths[:, None]                     # (n, Lmax) bool
+    attn_mask = valid[:, None, None, :]                     # (n, 1, 1, Lmax)
 
-    Why this is the interesting part: each row attends over a *different* number
-    of cached positions (cache.lengths[row]). You run one batched matmul over the
-    padded max length, then mask each row down to its own valid prefix so padding
-    positions contribute zero attention weight.
+    for i, block in enumerate(model.transformer.h):
+        attn = block.attn
+        h = block.ln_1(x)
+        q_dim = attn.nh * attn.hd
+        kv_dim = attn.nkv * attn.hd
+        q, k, v = attn.c_attn(h).split([q_dim, kv_dim, kv_dim], dim=-1)
+        q = q.view(n, 1, attn.nh, attn.hd).transpose(1, 2)   # (n, nh, 1, hd)
+        k = k.view(n, 1, attn.nkv, attn.hd).transpose(1, 2)  # (n, nkv, 1, hd)
+        v = v.view(n, 1, attn.nkv, attn.hd).transpose(1, 2)
+        cache.write(i, rows, k, v)
+        k_full = cache.k[i, rows][:, :, :Lmax]               # (n, nkv, Lmax, hd)
+        v_full = cache.v[i, rows][:, :, :Lmax]
+        k_full = repeat_kv(k_full, cfg.n_rep)
+        v_full = repeat_kv(v_full, cfg.n_rep)
+        att = (q @ k_full.transpose(-2, -1)) / math.sqrt(attn.hd)  # (n, nh, 1, Lmax)
+        att = att.masked_fill(~attn_mask, float("-inf"))
+        att = F.softmax(att, dim=-1)
+        y = (att @ v_full).transpose(1, 2).contiguous().view(n, 1, cfg.n_embd)
+        x = x + attn.c_proj(y)
+        x = x + block.mlp(block.ln_2(x))
 
-    Sketch:
-        1. positions = cache.lengths[rows]                      # (n_active,)
-           tok_emb = wte(idx); pos_emb = wpe(positions)[:, None]; x = tok_emb + pos_emb
-        2. Lmax = max length among rows. Build a key-padding mask of shape
-           (n_active, Lmax): True where key position < that row's length.
-        3. for each layer / Block b:
-             a. project ln_1(x) with b.attn.c_attn -> q,k,v ; reshape:
-                q -> (n_active, nh, 1, hd); k,v -> (n_active, nkv, 1, hd)
-             b. cache.write(layer, rows, k, v)                  # store new K/V
-             c. gather full K/V for these rows up to Lmax:
-                k_full = cache.k[layer, rows, :, :Lmax] ; same for v   # (n_active, nkv, Lmax, hd)
-             d. expand with repeat_kv -> (n_active, nh, Lmax, hd)
-             e. attention with the padding mask. Two ok options:
-                  - F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=mask4d)
-                  - or your own scores -> masked_fill(-inf) -> softmax -> @v
-                (Do NOT use causal=True here: with Tq=1 the only constraint is the
-                 padding mask; the new token may see all valid cached positions.)
-             f. reshape, c_proj, residual; then x = x + b.mlp(b.ln_2(x))
-        4. x = ln_f(x); logits = lm_head(x)[:, -1]              # (n_active, vocab)
-        5. cache.lengths[rows] += 1
-    """
-    raise NotImplementedError
+    cache.lengths[rows] += 1
+    x = model.transformer.ln_f(x)
+    return model.lm_head(x)[:, -1]                           # (n, vocab)
 
 
 class ContinuousBatchingScheduler:
-    """Iteration-level scheduler. You implement `step` and `run`."""
-
     def __init__(self, model: GPT, config: GPTConfig, max_batch_size: int,
                  max_seq_len: int):
         self.model = model
         self.config = config
         self.max_batch_size = max_batch_size
-        self.cache = BatchedKVCache(config, max_batch_size, max_seq_len)
-        self.waiting: list[Request] = []     # not yet started (FIFO)
-        self.running: list[Request] = []      # currently decoding
+        self.device = next(model.parameters()).device
+        self.cache = BatchedKVCache(config, max_batch_size, max_seq_len, device=self.device,
+                                    dtype=next(model.parameters()).dtype)
+        self.waiting: list[Request] = []
+        self.running: list[Request] = []
         self.finished: list[Request] = []
 
     def add_request(self, req: Request) -> None:
         self.waiting.append(req)
 
-    def _admit(self) -> None:
-        """Move waiting requests into free slots and prefill them.
+    def _sample(self, req: Request, logits_row: torch.Tensor) -> None:
+        nxt = sample_next(
+            logits_row, temperature=req.temperature, top_k=req.top_k, top_p=req.top_p,
+            generator=req._gen,
+        )
+        req.generated.append(int(nxt))
 
-        For each free slot while `waiting` is non-empty:
-            - pop a Request, allocate a slot, set req.slot
-            - prefill: feed the prompt through the cache so the slot holds the
-              prompt's K/V and you have logits for the first generated token.
-              You can prefill one token at a time with `batched_decode_step`
-              (rows=[slot]) over the prompt, keeping the LAST logits; that reuses
-              your decode primitive and keeps this simple.
-            - sample the first token from those logits (use the request's own
-              generator/sampling params), append it to req.generated
-            - move req from waiting to running; mark done if it hit a limit
-        Implement this (it's part of the exercise — it's where prefill lives).
-        """
-        raise NotImplementedError
+    def _retire(self, req: Request) -> None:
+        req.done = True
+        self.cache.release(req.slot)
+        if req in self.running:
+            self.running.remove(req)
+        self.finished.append(req)
+
+    def _admit(self) -> None:
+        while self.cache.free_slots and self.waiting:
+            req = self.waiting.pop(0)
+            slot = self.cache.allocate()
+            req.slot = slot
+            req._gen = torch.Generator(device=self.device).manual_seed(req.seed)
+            prompt = req.prompt.to(self.device)
+            # prefill one token at a time (reuses the decode primitive)
+            last = None
+            for t in range(prompt.shape[0]):
+                last = batched_decode_step(self.model, prompt[t].view(1, 1), self.cache, [slot])
+            self._sample(req, last)  # first generated token
+            if len(req.generated) >= req.max_new_tokens:
+                self._retire(req)
+            else:
+                self.running.append(req)
 
     def step(self) -> None:
-        """Advance every running request by exactly one decoded token.
-
-        - Build idx (n_running, 1) from each running request's LAST token.
-        - logits = batched_decode_step(model, idx, cache, rows=[r.slot ...])
-        - For each running request, sample its next token from its row of logits
-          using that request's own generator + sampling params, append it.
-        - Retire requests that reached max_new_tokens: mark done, release their
-          slot, move to finished.
-        - Call self._admit() to backfill freed slots with waiting requests.
-
-        The invariant the tests check: len(running) is never > max_batch_size,
-        and a finished request's tokens are independent of what else was batched
-        alongside it.
-        """
-        raise NotImplementedError
+        if not self.running:
+            return
+        rows = [r.slot for r in self.running]
+        idx = torch.tensor([[r.generated[-1]] for r in self.running],
+                           dtype=torch.long, device=self.device)
+        logits = batched_decode_step(self.model, idx, self.cache, rows)  # (n, vocab)
+        finished_now = []
+        for j, r in enumerate(self.running):
+            self._sample(r, logits[j:j + 1])
+            if len(r.generated) >= r.max_new_tokens:
+                finished_now.append(r)
+        for r in finished_now:
+            self._retire(r)
+        self._admit()
 
     def run(self) -> dict[int, torch.Tensor]:
-        """Drive the scheduler until all requests finish.
-
-        Returns: {req_id: full output sequence tensor}.
-        Typical loop: admit, then while running: step().
-        """
-        raise NotImplementedError
+        self._admit()
+        while self.running:
+            self.step()
+        return {r.req_id: r.output() for r in self.finished}
