@@ -87,8 +87,8 @@ class CausalSelfAttention(nn.Module):
         # Fused QKV projection. Q gets nh*hd cols; K and V each get nkv*hd cols.
         q_dim = config.n_head * config.head_dim
         kv_dim = config.n_kv_head * config.head_dim
-        self.c_attn = nn.Linear(config.n_embd, q_dim + 2 * kv_dim, bias=config.bias)
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.c_attn = nn.Linear(config.n_embd, q_dim + 2 * kv_dim, bias=False)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Self-attention over the whole sequence (no cache yet — that's Stage 2).
@@ -111,8 +111,8 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Position-wise feed-forward: c_fc -> GELU -> c_proj. Shapes unchanged."""
@@ -122,9 +122,9 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = nn.LayerNorm(config.n_embd, bias=False)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = nn.LayerNorm(config.n_embd, bias=False)
         self.mlp = MLP(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -144,7 +144,7 @@ class GPT(nn.Module):
             wte=nn.Embedding(config.vocab_size, config.n_embd),
             wpe=nn.Embedding(config.block_size, config.n_embd),
             h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f=nn.LayerNorm(config.n_embd, bias=config.bias),
+            ln_f=nn.LayerNorm(config.n_embd, bias=False),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # weight tying (standard GPT trick)
