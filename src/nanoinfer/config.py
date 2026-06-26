@@ -21,6 +21,10 @@ class GPTConfig:
     dropout: float = 0.0
     # No bias anywhere (linears + norms): modern decoder LLMs (LLaMA, Mistral,
     # ...) drop it — it costs params/bandwidth for negligible quality.
+    # Tie the token embedding (wte) and the output projection (lm_head) to share
+    # one weight matrix. Saves vocab*n_embd params and is standard in smaller
+    # models (GPT-2, Gemma); large models (LLaMA) leave them untied, so default off.
+    tie_weights: bool = False
 
     def __post_init__(self):
         assert self.n_embd % self.n_head == 0, "n_embd must be divisible by n_head"

@@ -41,8 +41,14 @@ def test_gpt_forward_shape(config):
     assert logits.shape == (3, 7, config.vocab_size)
 
 
-def test_weight_tying(config):
+def test_weights_untied_by_default(config):
+    # default config has tie_weights=False -> wte and lm_head are separate params
     model = GPT(config)
+    assert model.transformer.wte.weight is not model.lm_head.weight
+
+
+def test_weight_tying_when_enabled():
+    model = GPT(GPTConfig(tie_weights=True))
     assert model.transformer.wte.weight is model.lm_head.weight
 
 

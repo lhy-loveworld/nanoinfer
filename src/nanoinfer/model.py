@@ -147,8 +147,9 @@ class GPT(nn.Module):
             ln_f=nn.LayerNorm(config.n_embd, bias=False),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # weight tying (standard GPT trick)
-        self.transformer.wte.weight = self.lm_head.weight
+        if config.tie_weights:
+            # share one matrix between input embedding and output projection
+            self.transformer.wte.weight = self.lm_head.weight
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         """Full forward pass over a batch of token ids.
