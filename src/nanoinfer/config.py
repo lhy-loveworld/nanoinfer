@@ -19,7 +19,8 @@ class GPTConfig:
     n_kv_head: int = 2          # number of key/value heads (GQA when < n_head)
     n_embd: int = 32            # embedding / residual stream width
     dropout: float = 0.0
-    bias: bool = True
+    # No bias anywhere (linears + norms): modern decoder LLMs (LLaMA, Mistral,
+    # ...) drop it — it costs params/bandwidth for negligible quality.
 
     def __post_init__(self):
         assert self.n_embd % self.n_head == 0, "n_embd must be divisible by n_head"
