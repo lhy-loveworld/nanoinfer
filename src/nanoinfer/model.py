@@ -104,7 +104,8 @@ class GPT(nn.Module):
             ln_f=nn.LayerNorm(config.n_embd, bias=False),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.transformer.wte.weight = self.lm_head.weight
+        if config.tie_weights:
+            self.transformer.wte.weight = self.lm_head.weight
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         B, T = idx.shape
