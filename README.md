@@ -24,6 +24,7 @@ src/nanoinfer/
   speculative.py   Stage 5a: draft + verify speculative decoding
   quant.py         Stage 5b: INT8 per-channel + FP8 quantization
   flash.py         Stage 5c: tiled attention with online softmax
+  rope.py          Stage 1+: rotary position embeddings (RoPE)
 tests/             one test module per source module
 ```
 
@@ -42,8 +43,10 @@ batching contract is checked against your `generate`).
 | **5a** | `draft_k`, `verify`, `speculative_generate` | speculative-greedy == plain greedy target | accept/reject; K+1 tokens per target forward |
 | **5b** | `quantize_per_channel_int8`, `QuantizedLinear`, `fp8_roundtrip` | bounded round-trip + linear error | memory-bandwidth-bound decode; per-channel scales |
 | **5c** | `flash_attention` | matches SDPA incl. ragged tail | online softmax; O(T) memory streaming |
+| **1+** | `rotate_half`, `build_rope_cache`, `apply_rope` | relative-position invariance; norm preserved | rotary embeddings; lifts the `block_size` cap |
 
 Suggested order: **1 → 2 → 3 → 4**, then pick among **5a/5b/5c** in any order.
+RoPE (**1+**) is a self-contained side quest — do it any time after Stage 1.
 
 ## Setup
 
