@@ -18,13 +18,8 @@ You implement three pieces:
 Convention (LLaMA / HF "NeoX" style): pair dim i with dim i + hd/2 (the two
 halves), not adjacent dims. `hd` must be even.
 
-How it would integrate (NOT needed to pass these tests, and intentionally not
-wired into model.py so you can do it yourself):
-    - drop `wpe` from GPT; build ONE cache of length block_size up front
-    - inside attention, after the head reshape and BEFORE the q@k^T score, do
-      q = apply_rope(q, cos, sin); k = apply_rope(k, cos, sin)   # v is NOT rotated
-    - with a KV cache (Stage 2), slice cos/sin at the token's ABSOLUTE position
-      (start_pos .. start_pos+T) — same offset logic as the position ids.
+Wiring RoPE into model.py is intentionally left to you (not needed to pass these
+tests) — see HINTS.md (Wiring RoPE into the model) when you want to do it.
 
 Run the tests with:
     pytest tests/test_rope.py
@@ -61,16 +56,10 @@ def build_rope_cache(
         head_dim: per-head dimension hd (must be even).
         base: rotary base theta (10000 is standard).
     Returns:
-        (cos, sin), each of shape (seq_len, head_dim).
+        (cos, sin), each of shape (seq_len, head_dim). Dim i and dim i+hd/2 must
+        share a frequency — that's the half-split pairing rotate_half assumes.
 
-    Steps:
-        1. inv_freq = 1 / base ** (arange(0, head_dim, 2) / head_dim)    # (hd/2,)
-        2. angles   = outer(arange(seq_len), inv_freq)                   # (seq_len, hd/2)
-        3. emb      = cat([angles, angles], dim=-1)                      # (seq_len, hd)
-           (duplicated so dim i and dim i+hd/2 share a frequency — that's the
-            half-split pairing rotate_half assumes)
-        4. return emb.cos(), emb.sin()
-    Compute angles in float32 for precision, then cast to `dtype` at the end.
+    Stuck? See HINTS.md (rope.build_rope_cache).
     """
     raise NotImplementedError
 

@@ -53,15 +53,10 @@ class KVCache:
             (k_full, v_full) each of shape (B, nkv, length + Tnew, hd): the keys
             and values for *all* positions seen so far (including the new ones).
 
-        Notes:
-            - Write into self.k[layer_idx] / self.v[layer_idx] at the slice
-              [:, :, self.length : self.length + Tnew].
-            - Only advance self.length once (after the LAST layer), or track it
-              so repeated per-layer appends in one step don't over-count. A clean
-              approach: advance length in `decode_step` after all layers, and
-              have append use a passed-in write offset. Choose a scheme and keep
-              it consistent — the tests only check the returned tensors and final
-              logits, not your bookkeeping style.
+        The one subtlety: advance self.length exactly once per decode step, not
+        once per layer, or repeated per-layer appends will over-count.
+
+        Stuck? See HINTS.md (kv_cache.KVCache.append).
         """
         raise NotImplementedError
 
@@ -87,19 +82,11 @@ def decode_step(model: GPT, idx: torch.Tensor, cache: KVCache, start_pos: int) -
         logits: (B, Tq, vocab_size). For pure decode you typically only use the
         last position, but returning all of them keeps prefill symmetric.
 
-    Implement by walking the model's submodules manually (you can't call
-    model.forward — it has no cache). Sketch:
-        1. tok_emb = wte(idx); pos_emb = wpe(arange(start_pos, start_pos+Tq))
-        2. x = tok_emb + pos_emb
-        3. for each layer i / Block b:
-             a. h = b.ln_1(x); project with b.attn.c_attn; split into q,k,v
-             b. reshape q -> (B,nh,Tq,hd); k,v -> (B,nkv,Tq,hd)
-             c. k_full, v_full = cache.append(i, k, v)
-             d. expand k_full,v_full with repeat_kv; y = attention(q, k_full, v_full, causal=True)
-             e. reshape y, apply b.attn.c_proj, add residual
-             f. x = x + b.mlp(b.ln_2(x))
-        4. x = ln_f(x); logits = lm_head(x)
-    The causal mask in `attention` with Tq=1, Tk=cache_len lets the new token
-    attend to everything cached — verify you understand why before moving on.
+    You implement this by walking the model's submodules manually (you can't call
+    model.forward — it has no cache). The causal mask in `attention` with Tq=1,
+    Tk=cache_len lets the new token attend to everything cached — verify you
+    understand why before moving on.
+
+    Stuck? See HINTS.md (kv_cache.decode_step).
     """
     raise NotImplementedError

@@ -107,16 +107,9 @@ def generate(
     Returns:
         (B, T0 + max_new_tokens) token ids.
 
-    Sketch:
-        1. allocate a KVCache sized for T0 + max_new_tokens
-        2. prefill: logits = decode_step(model, idx, cache, start_pos=0)
-        3. loop max_new_tokens times:
-             - next_tok = sample_next(logits[:, -1], ...)   # (B,)
-             - append next_tok to the running sequence
-             - logits = decode_step(model, next_tok[:, None], cache, start_pos=cache.length)
-        4. return the full sequence
-
     This is the function the batching stage (Stage 4) generalizes to many
     sequences of different lengths sharing the model.
+
+    Stuck? See HINTS.md (generate.generate).
     """
     raise NotImplementedError

@@ -33,21 +33,11 @@ def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     Returns:
         (B, nh, T, hd), numerically equal (within tolerance) to softmax attention.
 
-    Algorithm (per query block, streaming over key blocks):
-        Maintain for each query row: m (running max logit, init -inf),
-        l (running sum of exp, init 0), acc (running output accumulator, init 0).
-        For each key/value block (Kj, Vj):
-            S   = (Qi @ Kj^T) / sqrt(hd)              # (block_q, block_k)
-            apply causal mask to S where needed (skip fully-masked future blocks)
-            m_new = max(m, rowmax(S))
-            p   = exp(S - m_new)                      # rescaled probabilities
-            l   = l * exp(m - m_new) + rowsum(p)
-            acc = acc * exp(m - m_new)[:, None] + p @ Vj
-            m   = m_new
-        Output_i = acc / l[:, None]
+    The crux is the online-softmax recurrence: a running max, running denominator,
+    and running output accumulator that get rescaled whenever a later key block
+    raises the running max. Get that rescaling right and your output matches a
+    single full softmax exactly.
 
-    The exp(m_old - m_new) rescaling is the crux — it retroactively corrects the
-    earlier partial sums when a later block raises the running max. Get that right
-    and your output matches a single full softmax exactly.
+    Stuck? See HINTS.md (flash.flash_attention).
     """
     raise NotImplementedError
