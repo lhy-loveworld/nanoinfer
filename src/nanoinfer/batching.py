@@ -116,28 +116,11 @@ def batched_decode_step(model: GPT, idx: torch.Tensor, cache: BatchedKVCache,
     Why this is the interesting part: each row attends over a *different* number
     of cached positions (cache.lengths[row]). You run one batched matmul over the
     padded max length, then mask each row down to its own valid prefix so padding
-    positions contribute zero attention weight.
+    positions contribute zero attention weight. (Do NOT use causal masking here:
+    with Tq=1 the only constraint is the padding mask; the new token may see all
+    valid cached positions.)
 
-    Sketch:
-        1. positions = cache.lengths[rows]                      # (n_active,)
-           tok_emb = wte(idx); pos_emb = wpe(positions)[:, None]; x = tok_emb + pos_emb
-        2. Lmax = max length among rows. Build a key-padding mask of shape
-           (n_active, Lmax): True where key position < that row's length.
-        3. for each layer / Block b:
-             a. project ln_1(x) with b.attn.c_attn -> q,k,v ; reshape:
-                q -> (n_active, nh, 1, hd); k,v -> (n_active, nkv, 1, hd)
-             b. cache.write(layer, rows, k, v)                  # store new K/V
-             c. gather full K/V for these rows up to Lmax:
-                k_full = cache.k[layer, rows, :, :Lmax] ; same for v   # (n_active, nkv, Lmax, hd)
-             d. expand with repeat_kv -> (n_active, nh, Lmax, hd)
-             e. attention with the padding mask. Two ok options:
-                  - F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=mask4d)
-                  - or your own scores -> masked_fill(-inf) -> softmax -> @v
-                (Do NOT use causal=True here: with Tq=1 the only constraint is the
-                 padding mask; the new token may see all valid cached positions.)
-             f. reshape, c_proj, residual; then x = x + b.mlp(b.ln_2(x))
-        4. x = ln_f(x); logits = lm_head(x)[:, -1]              # (n_active, vocab)
-        5. cache.lengths[rows] += 1
+    Stuck? See HINTS.md (batching.batched_decode_step).
     """
     raise NotImplementedError
 
@@ -161,34 +144,21 @@ class ContinuousBatchingScheduler:
     def _admit(self) -> None:
         """Move waiting requests into free slots and prefill them.
 
-        For each free slot while `waiting` is non-empty:
-            - pop a Request, allocate a slot, set req.slot
-            - prefill: feed the prompt through the cache so the slot holds the
-              prompt's K/V and you have logits for the first generated token.
-              You can prefill one token at a time with `batched_decode_step`
-              (rows=[slot]) over the prompt, keeping the LAST logits; that reuses
-              your decode primitive and keeps this simple.
-            - sample the first token from those logits (use the request's own
-              generator/sampling params), append it to req.generated
-            - move req from waiting to running; mark done if it hit a limit
-        Implement this (it's part of the exercise — it's where prefill lives).
+        This is part of the exercise — it's where prefill lives.
+
+        Stuck? See HINTS.md (batching.ContinuousBatchingScheduler._admit).
         """
         raise NotImplementedError
 
     def step(self) -> None:
-        """Advance every running request by exactly one decoded token.
-
-        - Build idx (n_running, 1) from each running request's LAST token.
-        - logits = batched_decode_step(model, idx, cache, rows=[r.slot ...])
-        - For each running request, sample its next token from its row of logits
-          using that request's own generator + sampling params, append it.
-        - Retire requests that reached max_new_tokens: mark done, release their
-          slot, move to finished.
-        - Call self._admit() to backfill freed slots with waiting requests.
+        """Advance every running request by exactly one decoded token, retire
+        any that hit max_new_tokens, and backfill freed slots via self._admit().
 
         The invariant the tests check: len(running) is never > max_batch_size,
         and a finished request's tokens are independent of what else was batched
         alongside it.
+
+        Stuck? See HINTS.md (batching.ContinuousBatchingScheduler.step).
         """
         raise NotImplementedError
 
@@ -196,6 +166,7 @@ class ContinuousBatchingScheduler:
         """Drive the scheduler until all requests finish.
 
         Returns: {req_id: full output sequence tensor}.
-        Typical loop: admit, then while running: step().
+
+        Stuck? See HINTS.md (batching.ContinuousBatchingScheduler.run).
         """
         raise NotImplementedError

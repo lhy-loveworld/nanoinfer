@@ -10,7 +10,8 @@ substrate, then KV caching, sampling, continuous batching, and serving-grade
 optimizations (speculative decoding, quantization, tiled attention).
 
 > Built as interview prep for an inference-focused research-engineering role.
-> The tests are the spec; the docstrings are the hints.
+> The tests are the spec; each docstring states the contract. Implementation
+> sketches live separately in [`HINTS.md`](HINTS.md) — peek only when stuck.
 
 ## Layout
 
@@ -103,7 +104,7 @@ and tooling are identical, so the diff is purely "your job vs. one correct answe
 ## How to use this for interview prep
 
 - Treat each docstring as the problem statement and the test as the acceptance
-  criteria — implement without peeking at reference repos first.
+  criteria — implement without peeking at reference repos (or `HINTS.md`) first.
 - After a stage is green, re-derive the *why*: why does GQA cut cache size by
   `n_head / n_kv_head`? why must speculative-greedy be exact regardless of draft
   quality? why does the online-softmax rescale term exist?

@@ -55,8 +55,7 @@ class QuantizedLinear(nn.Module):
     def from_linear(cls, linear: nn.Linear) -> "QuantizedLinear":
         """Quantize an existing nn.Linear's weight into a QuantizedLinear.
 
-        Steps: q, scale = quantize_per_channel_int8(linear.weight.data); copy
-        bias (if any). Return cls(q, scale, bias).
+        Stuck? See HINTS.md (quant.QuantizedLinear.from_linear).
         """
         raise NotImplementedError
 

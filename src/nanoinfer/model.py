@@ -40,10 +40,9 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     Returns:
         Tensor of shape (B, nkv * n_rep, T, hd), where head group g is repeated
         n_rep times contiguously so it lines up with the query head layout.
+        When n_rep == 1 (standard multi-head attention) this is a no-op.
 
-    Implement this without allocating more memory than necessary where you can
-    (hint: torch.expand + reshape, or repeat_interleave on the head dim). When
-    n_rep == 1 (standard multi-head attention) this should be a no-op.
+    Stuck? See HINTS.md (model.repeat_kv).
     """
     raise NotImplementedError
 
@@ -72,8 +71,7 @@ def attention(
     Returns:
         (B, nh, Tq, hd) attention output.
 
-    Steps: scores = q @ k^T / sqrt(hd)  ->  apply causal mask  ->  softmax over
-    the key axis  ->  weighted sum with v.
+    Stuck? See HINTS.md (model.attention).
     """
     raise NotImplementedError
 
@@ -106,15 +104,7 @@ class CausalSelfAttention(nn.Module):
         Returns:
             (B, T, C)
 
-        Steps:
-            1. project x with c_attn, split into q (nh*hd), k (nkv*hd), v (nkv*hd)
-            2. reshape each into (B, heads, T, hd) — note q has nh heads, k/v nkv
-            3. if self.config.rope: apply RoPE to q and k using self.rope_cos[:T]
-               and self.rope_sin[:T] — do this BEFORE repeat_kv (rotate the nkv
-               k-heads, not the expanded nh) and NEVER rotate v
-            4. expand k, v to nh heads with repeat_kv
-            5. y = attention(q, k, v, causal=True)
-            6. reshape y back to (B, T, C) and apply c_proj
+        Stuck? See HINTS.md (model.CausalSelfAttention.forward).
         """
         raise NotImplementedError
 
@@ -173,16 +163,10 @@ class GPT(nn.Module):
         Returns:
             logits: (B, T, vocab_size)
 
-        Steps:
-            1. x = wte(idx). If NOT config.rope, also add wpe(positions) where
-               positions = [0, 1, ..., T-1]. If config.rope, add nothing here —
-               position enters inside attention via the rotary q/k rotation.
-            2. run through each block in self.transformer.h
-            3. final layernorm ln_f
-            4. project to vocab with lm_head
-
-        (Position handling becomes interesting in Stage 2 when you decode one
+        Position handling becomes interesting in Stage 2 when you decode one
         token at a time — the position of the new token is the cache length, not
-        zero. Write this now in a way you'll be able to generalize.)
+        zero. Write this now in a way you'll be able to generalize.
+
+        Stuck? See HINTS.md (model.GPT.forward).
         """
         raise NotImplementedError
