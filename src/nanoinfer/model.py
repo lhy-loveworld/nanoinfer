@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import GPTConfig
+from .rope import apply_rope, build_rope_cache
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -53,6 +54,14 @@ class CausalSelfAttention(nn.Module):
         kv_dim = config.n_kv_head * config.head_dim
         self.c_attn = nn.Linear(config.n_embd, q_dim + 2 * kv_dim, bias=False)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        if config.rope:
+            # Register as buffers (persistent=False) so .to(device)/.half() carry
+            # them along and they stay out of the state_dict. (A production model
+            # would build this ONCE in GPT and thread cos/sin down to avoid the
+            # per-layer copy; per-layer is simpler and fine at this scale.)
+            cos, sin = build_rope_cache(config.max_seq_len, config.head_dim)
+            self.register_buffer("rope_cos", cos, persistent=False)
+            self.register_buffer("rope_sin", sin, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
@@ -62,6 +71,12 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.nh, self.hd).transpose(1, 2)   # (B, nh, T, hd)
         k = k.view(B, T, self.nkv, self.hd).transpose(1, 2)  # (B, nkv, T, hd)
         v = v.view(B, T, self.nkv, self.hd).transpose(1, 2)
+        if self.config.rope:
+            # rotate q/k by position BEFORE expanding KV heads (fewer rotations);
+            # v is never rotated.
+            cos, sin = self.rope_cos[:T], self.rope_sin[:T]
+            q = apply_rope(q, cos, sin)
+            k = apply_rope(k, cos, sin)
         k = repeat_kv(k, self.config.n_rep)
         v = repeat_kv(v, self.config.n_rep)
         y = attention(q, k, v, causal=True)                  # (B, nh, T, hd)
@@ -99,18 +114,22 @@ class GPT(nn.Module):
         self.config = config
         self.transformer = nn.ModuleDict(dict(
             wte=nn.Embedding(config.vocab_size, config.n_embd),
-            wpe=nn.Embedding(config.block_size, config.n_embd),
             h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f=nn.LayerNorm(config.n_embd, bias=False),
         ))
+        if not config.rope:
+            self.transformer["wpe"] = nn.Embedding(config.block_size, config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         if config.tie_weights:
             self.transformer.wte.weight = self.lm_head.weight
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         B, T = idx.shape
-        pos = torch.arange(T, device=idx.device)
-        x = self.transformer.wte(idx) + self.transformer.wpe(pos)
+        x = self.transformer.wte(idx)
+        if not self.config.rope:
+            # learned absolute positions; under RoPE, position is injected inside
+            # attention instead, so nothing is added here.
+            x = x + self.transformer.wpe(torch.arange(T, device=idx.device))
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
