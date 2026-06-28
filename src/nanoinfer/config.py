@@ -25,10 +25,18 @@ class GPTConfig:
     # one weight matrix. Saves vocab*n_embd params and is standard in smaller
     # models (GPT-2, Gemma); large models (LLaMA) leave them untied, so default off.
     tie_weights: bool = False
+    # Use rotary position embeddings instead of a learned wpe table. When True,
+    # GPT drops wpe entirely and attention rotates q/k by position (see rope.py).
+    # This is what modern decoders (LLaMA, Mistral, ...) use, and it lifts the
+    # block_size generation cap — context is then bounded by max_seq_len.
+    rope: bool = False
+    max_seq_len: int = 1024     # length of the precomputed rotary cache (rope only)
 
     def __post_init__(self):
         assert self.n_embd % self.n_head == 0, "n_embd must be divisible by n_head"
         assert self.n_head % self.n_kv_head == 0, "n_head must be divisible by n_kv_head"
+        if self.rope:
+            assert self.head_dim % 2 == 0, "RoPE requires an even head_dim"
 
     @property
     def head_dim(self) -> int:

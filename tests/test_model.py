@@ -85,3 +85,54 @@ def test_gpt_runs_on_gpu(config, device):
     logits = model(idx)
     assert logits.device.type == "cuda"
     assert logits.shape == (4, 16, config.vocab_size)
+
+
+# --- RoPE integration (config.rope=True) -----------------------------------
+# These check the *wiring*, not the rotary math itself (that's test_rope.py):
+# the model runs, stays causal, drops wpe, and isn't capped at block_size.
+
+def test_rope_model_forward_shape():
+    cfg = GPTConfig(rope=True)
+    model = GPT(cfg).eval()
+    idx = torch.randint(0, cfg.vocab_size, (2, 7))
+    assert model(idx).shape == (2, 7, cfg.vocab_size)
+
+
+def test_rope_model_has_no_wpe():
+    assert "wpe" not in GPT(GPTConfig(rope=True)).transformer
+    assert "wpe" in GPT(GPTConfig(rope=False)).transformer
+
+
+def test_rope_model_is_causal():
+    cfg = GPTConfig(rope=True)
+    model = GPT(cfg).eval()
+    idx = torch.randint(0, cfg.vocab_size, (1, 8))
+    with torch.no_grad():
+        base = model(idx)
+        idx2 = idx.clone()
+        idx2[0, -1] = (idx2[0, -1] + 1) % cfg.vocab_size
+        perturbed = model(idx2)
+    torch.testing.assert_close(base[:, :-1], perturbed[:, :-1])
+
+
+def test_rope_lifts_block_size_cap():
+    # learned wpe caps sequences at block_size; RoPE only at max_seq_len, so a
+    # sequence longer than block_size must still run.
+    cfg = GPTConfig(rope=True, block_size=8, max_seq_len=64)
+    model = GPT(cfg).eval()
+    idx = torch.randint(0, cfg.vocab_size, (1, 32))  # 32 > block_size=8
+    assert model(idx).shape == (1, 32, cfg.vocab_size)
+
+
+@pytest.mark.gpu
+def test_rope_model_on_gpu(device):
+    # the real point of registering the rope cache as a BUFFER: it must move to
+    # the GPU with the model. A plain-attribute cache stays on CPU and this fails.
+    if device.type != "cuda":
+        pytest.skip("pass --device cuda to run")
+    cfg = GPTConfig(rope=True)
+    model = GPT(cfg).eval().to(device)
+    idx = torch.randint(0, cfg.vocab_size, (2, 16), device=device)
+    logits = model(idx)
+    assert logits.device.type == "cuda"
+    assert logits.shape == (2, 16, cfg.vocab_size)

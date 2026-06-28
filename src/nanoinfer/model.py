@@ -27,6 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import GPTConfig
+from .rope import apply_rope, build_rope_cache
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -89,6 +90,13 @@ class CausalSelfAttention(nn.Module):
         kv_dim = config.n_kv_head * config.head_dim
         self.c_attn = nn.Linear(config.n_embd, q_dim + 2 * kv_dim, bias=False)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        if config.rope:
+            # Precompute the rotary cos/sin tables and register them as BUFFERS
+            # (not plain attributes) so model.to(device)/.half() move them too.
+            # persistent=False keeps them out of the state_dict (recomputable).
+            cos, sin = build_rope_cache(config.max_seq_len, config.head_dim)
+            self.register_buffer("rope_cos", cos, persistent=False)
+            self.register_buffer("rope_sin", sin, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Self-attention over the whole sequence (no cache yet — that's Stage 2).
@@ -101,9 +109,12 @@ class CausalSelfAttention(nn.Module):
         Steps:
             1. project x with c_attn, split into q (nh*hd), k (nkv*hd), v (nkv*hd)
             2. reshape each into (B, heads, T, hd) — note q has nh heads, k/v nkv
-            3. expand k, v to nh heads with repeat_kv
-            4. y = attention(q, k, v, causal=True)
-            5. reshape y back to (B, T, C) and apply c_proj
+            3. if self.config.rope: apply RoPE to q and k using self.rope_cos[:T]
+               and self.rope_sin[:T] — do this BEFORE repeat_kv (rotate the nkv
+               k-heads, not the expanded nh) and NEVER rotate v
+            4. expand k, v to nh heads with repeat_kv
+            5. y = attention(q, k, v, causal=True)
+            6. reshape y back to (B, T, C) and apply c_proj
         """
         raise NotImplementedError
 
@@ -142,10 +153,13 @@ class GPT(nn.Module):
         self.config = config
         self.transformer = nn.ModuleDict(dict(
             wte=nn.Embedding(config.vocab_size, config.n_embd),
-            wpe=nn.Embedding(config.block_size, config.n_embd),
             h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f=nn.LayerNorm(config.n_embd, bias=False),
         ))
+        if not config.rope:
+            # learned absolute position table; with RoPE there is no wpe — the
+            # attention layers inject position by rotating q/k instead.
+            self.transformer["wpe"] = nn.Embedding(config.block_size, config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         if config.tie_weights:
             # share one matrix between input embedding and output projection
@@ -155,13 +169,14 @@ class GPT(nn.Module):
         """Full forward pass over a batch of token ids.
 
         Args:
-            idx: (B, T) int64 token ids, with T <= config.block_size
+            idx: (B, T) int64 token ids
         Returns:
             logits: (B, T, vocab_size)
 
         Steps:
-            1. token embeddings wte(idx) + position embeddings wpe(positions),
-               where positions = [0, 1, ..., T-1]
+            1. x = wte(idx). If NOT config.rope, also add wpe(positions) where
+               positions = [0, 1, ..., T-1]. If config.rope, add nothing here —
+               position enters inside attention via the rotary q/k rotation.
             2. run through each block in self.transformer.h
             3. final layernorm ln_f
             4. project to vocab with lm_head
